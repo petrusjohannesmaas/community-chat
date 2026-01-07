@@ -2,7 +2,7 @@ import asyncio
 import websockets
 
 async def echo_handler(websocket):
-    print(f"Client connected: {websocket.remote_address}")
+    print(f"\nClient connected: {websocket.remote_address}")
     
     try:
         async for message in websocket:
