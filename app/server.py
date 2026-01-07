@@ -6,11 +6,8 @@ async def echo_handler(websocket):
     
     try:
         async for message in websocket:
-            print(f"""
-            New message: {message}
-            \nFrom: {websocket.remote_address}
-            """)
-            response = f"OK"
+            print(f"\n➡️ {websocket.remote_address}: {message}")
+            response = "OK"
             await websocket.send(response)
     except websockets.exceptions.ConnectionClosedOK:
         print("Client disconnected gracefully")
