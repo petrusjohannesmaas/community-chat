@@ -1,73 +1,78 @@
-## Architecture: P2P Storage + Server relay
+# 🐍 PyRelay Chat
 
-### Overview
+A local-first, end-to-end encrypted (E2EE) messaging system built entirely in Python. The architecture follows a **peer-to-peer trust model with a minimal server relay**, ensuring the server never sees plaintext messages or stores conversation history.
 
-✔️ Simple to build
-✔️ Works on mobile networks
-✔️ Scales well
+## 🏗 Architecture Overview
 
-Think of the server like a post office that can’t open envelopes and doesn’t keep copies. **It only knows:**
-1. Sender
-2. Recipient
-3. “Here’s a blob”
+This project has been rebooted with a unified Python stack, prioritizing simplicity, security, and native Linux integration.
 
-| Feature           | Who owns it    |
-| ----------------- | -------------- |
-| Message content   | **Peers only** |
-| Message storage   | **Peers only** |
-| Encryption keys   | **Peers only** |
-| Server visibility | None           |
-| Server role       | Router         |
+- **Server (FastAPI):** Acts as a blind WebSocket relay. Handles authentication, connection management, and routes encrypted ciphertext between peers. Messages are held only in-memory for offline delivery and never written to disk.
+- **Client (GTK 4):** A native desktop interface built with `PyGObject`. Fully local-first, handling key generation, message encryption/decryption, offline queueing, and persistent storage via SQLite.
+- **Security:** End-to-end encryption using RSA-2048 for key exchange and PBKDF2 for payload encryption. The server only sees routing metadata and opaque ciphertext.
 
-This is **peer-to-peer trust**, not peer-to-peer transport — and that’s our sweet spot.
+## 🛠 Tech Stack
 
-### Components
+| Component | Technology |
+|---|---|
+| **Backend Server** | FastAPI, Starlette WebSockets, `pydantic` |
+| **Desktop Client** | GTK 4 (`PyGObject`), `asyncio` |
+| **Cryptography** | `cryptography` library (RSA-2048 + PBKDF2) |
+| **Local Storage** | SQLite (`aiosqlite`) |
+| **Shared Models** | Pydantic (`common/` module) |
 
-#### 1️⃣ WebSocket Relay Server
+## ✨ Key Features
 
-Our **WebSocket Relay Server** is deliberately minimal, with responsibilities limited to:
+- 🔒 **True E2EE:** Messages are encrypted client-side before transmission. The server acts purely as a router.
+- 📦 **Local-First Design:** All conversations, keys, and delivery states are stored on the device. You own your data.
+- 🔄 **Offline Sync & Queuing:** Messages sent while offline are queued locally and flushed upon reconnection. The server temporarily buffers messages for offline recipients in-memory.
+- 🖥️ **Native Linux UI:** Lightweight, fast, and integrated desktop experience using GTK 4.
+- 🐍 **Unified Python Codebase:** Eliminates cross-language friction, making development, testing, and maintenance straightforward.
 
-- **Authenticate user**: Verify identity before allowing a connection.
-- **Maintain online connections**: Keep track of active sessions and ensure reliable WebSocket channels.
-- **Forward encrypted messages**: Act purely as a relay, passing ciphertext payloads between connected peers.
+## 🚀 Getting Started
 
-Critically, the server **never writes messages to disk** — it only holds them in memory briefly if needed for delivery, preserving the **peer‑to‑peer, local‑first design**.
+### Prerequisites
+- Python 3.10+
+- `libgtk-4-dev` and `gir1.2-gtk-4.0` (for GTK client)
+- `pip` & `venv`
 
-```json
-{
-  "type": "message",
-  "from": "alice_id",
-  "to": "bob_id",
-  "ciphertext": "BASE64(...)",
-  "timestamp": 1736400000
-}
+### 1. Setup Environment
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 ```
 
-This ensures the server only sees opaque ciphertext and routing metadata, never plaintext.
+### 2. Run the Server
+```bash
+uvicorn backend.server:app --host 0.0.0.0 --port 8000 --reload
+```
 
----
+### 3. Launch the Client
+```bash
+python client/client_gtk.py
+```
+*Default connection:* `ws://localhost:8000/ws`
 
-#### 2️⃣ Flutter Client
+## 📁 Project Structure (Proposed)
+```
+├── backend/
+│   ├── server.py          # FastAPI WebSocket relay & routing
+│   └── models.py          # Pydantic message schemas
+├── client/
+│   ├── client_gtk.py      # GTK 4 UI & async WebSocket loop
+│   └── storage.py         # SQLite local storage & offline queue
+├── common/                # Shared crypto utils & message types
+├── requirements.txt
+└── README.md
+```
 
-We’re designing a **local‑first, end‑to‑end encrypted chat client** where the device itself is the source of truth.
+## 🗺 Roadmap
+- [x] Strip legacy Dart/Flutter frontend
+- [ ] Migrate server to FastAPI with WebSocket support
+- [ ] Implement GTK 4 client skeleton with async event loop integration
+- [ ] Port RSA/PBKDF2 encryption logic using `cryptography`
+- [ ] Add local SQLite persistence & offline message queuing
+- [ ] Implement authentication & secure key exchange flow
 
-Core requirements of the client:
-
-- **Local storage layer**: Using SQLite (via Drift) or Hive to persist conversations, messages, and delivery state directly on the device.
-- **Cryptographic foundation**: Generating a keypair on first install, keeping the private key local, and exchanging public keys through the server.
-- **Message security**: Every message is encrypted client‑side before leaving the device, ensuring the server never sees plaintext.
-- **Delivery state tracking**: Stored locally so the client can reconcile sent, delivered, and read states without relying on server‑side truth.
-
-This setup means your client is responsible for both **secure message handling** and **state management**, while the server acts mainly as a relay and key exchange facilitator.
-
----
-
-#### 3️⃣ Offline + sync behavior
-
-- **User offline**: Messages are queued locally in the client’s storage. Once the WebSocket reconnects, the client flushes the queue and sends them out.
-- **Recipient offline**: The server holds the message in a expiring memory queue until the recipient reconnects.
-- **Peer‑to‑peer integrity**: The server never becomes a permanent store of messages or states. It only facilitates delivery, keeping the architecture true to peer‑to‑peer principles.
-
-This approach gives users resilience against disconnections while preserving our local‑first, end‑to‑end encrypted model.
-
----
+## 📜 License
+[MIT](LICENSE)
