@@ -107,6 +107,23 @@ The desktop client is distributed as a native installer (`.deb`, `.exe`, `.dmg`)
 - React message list and input
 - Username set on first launch
 
+| File | Purpose |
+|---|---|
+| `deploy/docker-compose.yml` | Mosquitto broker config |
+| `deploy/mosquitto.conf` | Broker allows anonymous, port 1883 |
+| `src-tauri/src/mqtt.rs` | MQTT connect, publish, event loop |
+| `src-tauri/src/lib.rs` | Tauri commands: `connect`, `send_message` |
+| `src/App.tsx` | Connection screen + chat layout |
+| `src/components/MessageList.tsx` | Scrollable message history |
+| `src/components/MessageInput.tsx` | Text input with Enter/Send |
+
+### Expected flow
+```
+Enter username → Join → invoke("connect") → MQTT subscribe to community/general
+Type message  → Enter → invoke("send_message") → MQTT publish JSON
+Broker forwards → Rust eventloop receives → app.emit("mqtt-message") → React state update → MessageList re-renders
+```
+
 ### Phase 2 — Direct Messages
 - DM topic structure (`community/dm/{a}/{b}`)
 - Member list in UI
