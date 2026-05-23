@@ -1,23 +1,44 @@
-# Project TODO: Python Reboot
+# Project TODO
 
-## Phase 1: Infrastructure
-- [ ] Migrate `backend/server.py` from raw `websockets` to `FastAPI`.
-- [ ] Update `requirements.txt` with `fastapi`, `uvicorn`, and `python-multipart`.
-- [ ] Implement a basic `common/schemas.py` using Pydantic for message validation.
+## Phase 1 — Group Chat (current)
+- [ ] Mosquitto broker running via Docker Compose
+- [ ] Tauri project scaffolded (`cargo tauri init`)
+- [ ] `rumqttc` MQTT client connecting to broker from Rust
+- [ ] Subscribe to `community/general` on connect
+- [ ] Publish JSON message to `community/general`
+- [ ] Emit incoming messages from Rust to React via Tauri events
+- [ ] React connection screen (username input, join button)
+- [ ] React message list displaying incoming messages
+- [ ] React message input (send on Enter or button click)
+- [ ] Sender sees their own messages (received back from broker)
 
-## Phase 2: GTK Client (Proof of Concept)
-- [ ] Set up a basic GTK 4 window using `PyGObject`.
-- [ ] Implement the "Connection Screen" (Server URL, Username).
-- [ ] Integrate `asyncio` with the GTK main loop (using `GLib.idle_add` or a dedicated library like `gbulb`).
-- [ ] Implement the message display list and message entry field.
+## Phase 2 — Direct Messages
+- [ ] Member list in UI (manually configured for now)
+- [ ] DM topic structure: `community/dm/{userA}/{userB}`
+- [ ] Subscribe to own DM topic on connect
+- [ ] Click member name to open DM conversation
+- [ ] Separate message history per conversation in UI state
 
-## Phase 3: Encryption & Security
-- [ ] Add `cryptography` to dependencies.
-- [ ] Port RSA key generation logic from legacy research.
-- [ ] Port PBKDF2 key derivation logic.
-- [ ] Implement "First-Contact" key exchange (Public Key broadcasting).
+## Phase 3 — Polish
+- [ ] Persist username locally (Tauri store or local file)
+- [ ] Local message history (SQLite via `tauri-plugin-sql`)
+- [ ] Online presence (MQTT retained messages / will messages)
+- [ ] Typing indicators
+- [ ] Unread message count per conversation
+- [ ] Auto-scroll to latest message
+- [ ] Timestamp formatting
 
-## Phase 4: Polish
-- [ ] Add persistence (SQLite) for local chat history.
-- [ ] Add "typing..." indicators.
-- [ ] Implement a basic "Settings" menu for GTK UI.
+## Phase 4 — Auth and Invite System
+- [ ] Mosquitto password authentication (disable `allow_anonymous`)
+- [ ] Invite link generation (simple FastAPI endpoint)
+- [ ] Username registration tied to invite token
+- [ ] Admin view: list members, revoke access
+
+## Phase 5 — Encryption
+- [ ] Keypair generation on first launch (stored locally)
+- [ ] Public key published to server on registration
+- [ ] Fetch recipient public key before sending DM
+- [ ] Encrypt message payload before publish
+- [ ] Decrypt on receive
+- [ ] Key fingerprint display for manual verification
+- [ ] Group chat encryption strategy (decide: shared key vs per-member)

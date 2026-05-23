@@ -1,286 +1,398 @@
-# Technical Implementation Guide: FastAPI + GTK P2P Chat PoC
+# Technical Implementation Guide: Community Chat PoC
 
-This document outlines the exact infrastructure, schemas, and integration steps required to build the Proof of Concept. It follows a local-first architecture where clients own all message state and the server functions exclusively as a stateless WebSocket relay.
-
----
-
-## 1. Required Toolchain & Dependencies
-| Component | Package | Purpose |
-|-----------|---------|---------|
-| **Runtime** | Python 3.11+ | Async/await, type hints, standard library improvements |
-| **Server Framework** | `fastapi`, `uvicorn[standard]` | WebSocket endpoint, routing, HTTP health checks |
-| **Data Validation** | `pydantic` (v2) | Shared message schemas for client/server validation |
-| **Client GUI** | `PyGObject` (GTK 4 bindings) | Native desktop UI, event loop |
-| **Async DB** | `aiosqlite` | Non-blocking local message persistence |
-| **WebSocket Client** | `websockets` | Async bidirectional communication with FastAPI |
-| **Utilities** | `uuid`, `time`, `json`, `logging` | Message IDs, timestamps, serialization, diagnostics |
-
-**Project Structure**
-```
-poc_chat/
-├── common/
-│   └── models.py          # Shared Pydantic schemas
-├── server/
-│   ├── main.py            # FastAPI WebSocket relay
-│   └── requirements.txt
-├── client/
-│   ├── main.py            # GTK UI + async integration
-│   ├── db.py              # aiosqlite schema & queries
-│   └── ws_client.py       # WebSocket connection manager
-└── pyproject.toml
-```
+This document covers everything needed to get Phase 1 working — a group chat application where community members can send and receive messages in a shared channel.
 
 ---
 
-## 2. Define Shared Schemas
-Both server and client must validate messages against identical structures. Place these in `common/models.py`.
+## 1. What We're Building
 
-```python
-from pydantic import BaseModel, Field
-from typing import Literal, Optional
-from uuid import uuid4
-from time import time
+A native desktop app where:
+- A community administrator runs a Mosquitto broker via Docker
+- Members install the Tauri desktop client
+- Everyone connects to the same broker and chats in `community/general`
 
-class Message(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid4()))
-    from_user: str
-    to_user: str
-    type: Literal["message", "ack", "read", "sync_request"]
-    timestamp: float = Field(default_factory=time)
-    seq: int = 0
-    payload: str
-
-class ServerEnvelope(BaseModel):
-    # Wraps routing metadata for the server layer
-    type: Literal["route", "system"]
-    payload: Message | dict  # Message for route, status dict for system
-```
-
-**Validation Rules**
-- `id`: Globally unique UUID4. Used for deduplication.
-- `seq`: Monotonic integer incremented by the sender per conversation. Guarantees ordering when timestamps collide.
-- `type`: Determines client-side state transitions and server routing behavior.
-- `payload`: Plaintext string in PoC phase. Will become base64-encoded ciphertext in encryption phase.
+Nothing is stored on the server. No user accounts. No history server-side. The broker is a postbox — it receives a message and forwards it to everyone subscribed to that topic.
 
 ---
 
-## 3. Implement FastAPI WebSocket Relay
-The server maintains only active WebSocket connections in memory. It does not persist messages, keys, or history.
+## 2. Mosquitto Broker
 
-**`server/main.py`**
-```python
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from common.models import ServerEnvelope, Message
-import json
+The broker is the only server-side component. It runs in Docker and requires no custom code.
 
-app = FastAPI()
+**`deploy/docker-compose.yml`**
+```yaml
+version: "3.9"
 
-# In-memory connection registry: {username: WebSocket}
-active_connections: dict[str, WebSocket] = {}
-
-@app.websocket("/ws/{username}")
-async def websocket_endpoint(websocket: WebSocket, username: str):
-    await websocket.accept()
-    active_connections[username] = websocket
-    try:
-        while True:
-            raw = await websocket.receive_text()
-            envelope = ServerEnvelope.model_validate_json(raw)
-
-            if envelope.type == "route":
-                msg = Message.model_validate(envelope.payload)
-                target_ws = active_connections.get(msg.to_user)
-                if target_ws:
-                    await target_ws.send_text(raw)  # Forward exact payload
-                # If target offline, server drops message. Client handles offline queue.
-    except WebSocketDisconnect:
-        active_connections.pop(username, None)
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"     # MQTT
+      - "9001:9001"     # MQTT over WebSocket (for future web client)
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+    restart: unless-stopped
 ```
 
-**Infrastructure Notes**
-- Run with: `uvicorn server.main:app --reload --host 0.0.0.0 --port 8000`
-- No database, no authentication layer in PoC.
-- `active_connections` dict resets on server restart. Clients must implement reconnection logic.
-
----
-
-## 4. Implement GTK Client with Async Integration
-GTK runs on a single main thread. WebSockets and SQLite must execute asynchronously without blocking the UI.
-
-**Integration Pattern**
-1. Start `asyncio` event loop in a background thread.
-2. Use `GLib.idle_add()` to marshal WebSocket receipts and DB callbacks into GTK's main thread.
-3. Never call GTK widgets directly from `asyncio` tasks.
-
-**`client/ws_client.py`**
-```python
-import asyncio
-import websockets
-from gi.repository import GLib
-from common.models import ServerEnvelope, Message
-import json
-
-class WSManager:
-    def __init__(self, on_message_received, on_disconnect):
-        self.uri = "ws://localhost:8000/ws"
-        self.ws = None
-        self.on_message = on_message_received
-        self.on_disconnect = on_disconnect
-        self.username = None
-
-    async def connect(self, username: str):
-        self.username = username
-        self.ws = await websockets.connect(f"{self.uri}/{username}")
-        await self.listen()
-
-    async def listen(self):
-        try:
-            async for raw in self.ws:
-                GLib.idle_add(self.on_message, raw)
-        except websockets.ConnectionClosed:
-            GLib.idle_add(self.on_disconnect)
-
-    async def send(self, msg: Message):
-        envelope = ServerEnvelope(type="route", payload=msg)
-        if self.ws:
-            await self.ws.send(envelope.model_dump_json())
+**`deploy/mosquitto.conf`**
+```
+listener 1883
+listener 9001
+protocol websockets
+allow_anonymous true
 ```
 
-**GTK UI Skeleton (`client/main.py`)**
-```python
-import gi
-gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, GLib, GObject
-import asyncio, threading
+`allow_anonymous true` is intentional for Phase 1. Authentication is a Phase 3 concern. Do not expose port 1883 publicly without adding authentication first.
 
-class ChatApp(Gtk.Application):
-    def __init__(self):
-        super().__init__(application_id="com.localfirst.chat")
-        self.ws_manager = None
-        self.loop = None
-
-    def do_activate(self):
-        win = Gtk.ApplicationWindow(application=self)
-        win.set_default_size(600, 400)
-        # Add UI elements here (ListBox, Entry, Button)
-        win.show()
-
-        # Start asyncio loop in background thread
-        self.loop = asyncio.new_event_loop()
-        threading.Thread(target=self.loop.run_forever, daemon=True).start()
-        asyncio.run_coroutine_threadsafe(self._init_ws(), self.loop)
-
-    def _init_ws(self):
-        self.ws_manager = WSManager(
-            on_message_received=self._handle_incoming,
-            on_disconnect=self._handle_disconnect
-        )
-        asyncio.run_coroutine_threadsafe(self.ws_manager.connect("alice"), self.loop)
-
-    def _handle_incoming(self, raw: str):
-        # Executes on GTK main thread via GLib.idle_add
-        msg = Message.model_validate_json(raw)
-        # Update UI and trigger local DB insert
-        return False  # Required by GLib.idle_add
-
-    def _handle_disconnect(self):
-        # Update connection indicator
-        return False
+Start with:
+```bash
+docker compose up -d
 ```
 
 ---
 
-## 5. Local State Management & SQLite Schema
-Each client maintains its own conversation state. The server does not track delivery, reads, or history.
+## 3. Message Format
 
-**`client/db.py`**
-```sql
-CREATE TABLE IF NOT EXISTS messages (
-    id TEXT PRIMARY KEY,
-    from_user TEXT NOT NULL,
-    to_user TEXT NOT NULL,
-    type TEXT NOT NULL CHECK(type IN ('message','ack','read')),
-    timestamp REAL NOT NULL,
-    seq INTEGER NOT NULL,
-    payload TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('pending','sent','delivered','read')),
-    created_at REAL DEFAULT (strftime('%s','now'))
-);
-CREATE INDEX IF NOT EXISTS idx_conversation ON messages(from_user, to_user, timestamp);
+All messages are JSON published to `community/general`.
+
+```json
+{
+  "username": "alice",
+  "content": "Hello everyone",
+  "timestamp": 1716800000
+}
 ```
 
-**State Machine Transitions**
-| Status | Trigger | Action |
-|--------|---------|--------|
-| `pending` | User presses Enter, network unavailable | Store in SQLite |
-| `sent` | WebSocket successfully transmits | Update status to `sent` |
-| `delivered` | Receive `type: "ack"` matching `id` | Update status to `delivered` |
-| `read` | Receive `type: "read"` or UI scrolls into view | Update status to `read` |
+`timestamp` is Unix time in seconds. The client that receives the message formats it for display — the broker never interprets it.
 
-**Async DB Operations**
-Use `aiosqlite` to query/insert without blocking GTK. Always execute `INSERT` or `UPDATE` inside `asyncio.create_task()`, then marshal result to UI via `GLib.idle_add()`.
+This payload format is intentionally minimal. When encryption is added in a later phase, `content` becomes a ciphertext string. No other fields change.
 
 ---
 
-## 6. Integration & Message Routing Flow
+## 4. Tauri Project Structure
 
-1. **Client A** generates `Message` with UUID, `seq=1`, `status="pending"`. Inserts into SQLite.
-2. **Client A** calls `ws_manager.send(msg)`. `aiosqlite` updates status to `"sent"` on successful transmission.
-3. **FastAPI** receives envelope, validates Pydantic schema, looks up `to_user` in `active_connections`.
-4. **FastAPI** forwards raw JSON to **Client B**'s WebSocket.
-5. **Client B** deserializes, inserts into SQLite with `status="delivered"` (implicit on receipt), renders in GTK.
-6. **Client B** generates `ack` message with original `id`, sends back through same relay path.
-7. **Client A** receives `ack`, updates local SQLite row to `status="delivered"`.
-
-All state transitions occur locally. The server only sees opaque JSON and performs routing.
+```
+├── src/                          # React frontend
+│   ├── main.tsx                  # React entry point
+│   ├── App.tsx                   # Root component, Tauri event listeners
+│   └── components/
+│       ├── MessageList.tsx       # Scrolling message history
+│       └── MessageInput.tsx      # Text input and send button
+│
+├── src-tauri/                    # Rust backend
+│   ├── src/
+│   │   ├── main.rs               # Tauri builder, command registration
+│   │   └── mqtt.rs               # MQTT connection manager
+│   └── Cargo.toml
+│
+└── deploy/
+    ├── docker-compose.yml
+    └── mosquitto.conf
+```
 
 ---
 
-## 7. Offline Queue & Reconnection Logic
+## 5. Rust — MQTT Connection
 
-**Client-Side Queue**
-```python
-async def flush_pending_queue(self):
-    async with aiosqlite.connect("chat.db") as db:
-        cursor = await db.execute(
-            "SELECT * FROM messages WHERE status = 'pending' ORDER BY created_at ASC"
-        )
-        rows = await cursor.fetchall()
+Add `rumqttc` to `src-tauri/Cargo.toml`:
 
-    for row in rows:
-        msg = Message(...) # reconstruct from row
-        await self.ws_manager.send(msg)
-        # Update status to 'sent' after successful send
+```toml
+[dependencies]
+rumqttc = "0.24"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tauri = { version = "2", features = [] }
 ```
 
-**Reconnection Strategy**
-1. Detect `WebSocketDisconnect` or `ConnectionClosed`.
-2. Mark connection state as `disconnected` in UI.
-3. Start exponential backoff timer (`1s, 2s, 4s, 8s...`).
-4. On successful reconnect, call `flush_pending_queue()`.
-5. Send `sync_request` with `last_timestamp` to request missed messages if server implements ephemeral buffer (optional in PoC).
+**`src-tauri/src/mqtt.rs`**
+
+```rust
+use rumqttc::{AsyncClient, EventLoop, MqttOptions, QoS, Event, Packet};
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter};
+
+const TOPIC: &str = "community/general";
+const BROKER: &str = "localhost";
+const PORT: u16 = 1883;
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ChatMessage {
+    pub username: String,
+    pub content: String,
+    pub timestamp: u64,
+}
+
+pub async fn connect(app: AppHandle, username: String) -> AsyncClient {
+    let mut options = MqttOptions::new(&username, BROKER, PORT);
+    options.set_keep_alive(std::time::Duration::from_secs(30));
+
+    let (client, mut eventloop) = AsyncClient::new(options, 10);
+
+    // Subscribe to group channel
+    client
+        .subscribe(TOPIC, QoS::AtLeastOnce)
+        .await
+        .unwrap();
+
+    // Spawn listener — forwards incoming messages to React as Tauri events
+    tokio::spawn(async move {
+        loop {
+            match eventloop.poll().await {
+                Ok(Event::Incoming(Packet::Publish(msg))) => {
+                    if let Ok(payload) = std::str::from_utf8(&msg.payload) {
+                        if let Ok(chat_msg) = serde_json::from_str::<ChatMessage>(payload) {
+                            // Emit to React frontend
+                            app.emit("mqtt-message", chat_msg).ok();
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("MQTT error: {e}");
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    client
+}
+
+pub async fn publish(client: &AsyncClient, username: &str, content: &str) {
+    let msg = ChatMessage {
+        username: username.to_string(),
+        content: content.to_string(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    };
+
+    let payload = serde_json::to_string(&msg).unwrap();
+
+    client
+        .publish(TOPIC, QoS::AtLeastOnce, false, payload)
+        .await
+        .unwrap();
+}
+```
+
+**`src-tauri/src/main.rs`**
+
+```rust
+mod mqtt;
+
+use std::sync::Arc;
+use tauri::State;
+use tokio::sync::Mutex;
+use rumqttc::AsyncClient;
+
+struct MqttState(Arc<Mutex<Option<AsyncClient>>>);
+struct UsernameState(Arc<Mutex<String>>);
+
+#[tauri::command]
+async fn connect(
+    app: tauri::AppHandle,
+    username: String,
+    mqtt_state: State<'_, MqttState>,
+    username_state: State<'_, UsernameState>,
+) -> Result<(), String> {
+    let client = mqtt::connect(app, username.clone()).await;
+    *mqtt_state.0.lock().await = Some(client);
+    *username_state.0.lock().await = username;
+    Ok(())
+}
+
+#[tauri::command]
+async fn send_message(
+    content: String,
+    mqtt_state: State<'_, MqttState>,
+    username_state: State<'_, UsernameState>,
+) -> Result<(), String> {
+    let guard = mqtt_state.0.lock().await;
+    let username = username_state.0.lock().await;
+    if let Some(client) = guard.as_ref() {
+        mqtt::publish(client, &username, &content).await;
+    }
+    Ok(())
+}
+
+fn main() {
+    tauri::Builder::default()
+        .manage(MqttState(Arc::new(Mutex::new(None))))
+        .manage(UsernameState(Arc::new(Mutex::new(String::new()))))
+        .invoke_handler(tauri::generate_handler![connect, send_message])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+```
+
+---
+
+## 6. React Frontend
+
+**`src/App.tsx`**
+
+```tsx
+import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import MessageList from "./components/MessageList";
+import MessageInput from "./components/MessageInput";
+
+interface ChatMessage {
+  username: string;
+  content: string;
+  timestamp: number;
+}
+
+export default function App() {
+  const [username, setUsername] = useState("");
+  const [connected, setConnected] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+
+  useEffect(() => {
+    const unlisten = listen<ChatMessage>("mqtt-message", (event) => {
+      setMessages((prev) => [...prev, event.payload]);
+    });
+    return () => { unlisten.then(f => f()); };
+  }, []);
+
+  async function handleConnect() {
+    await invoke("connect", { username });
+    setConnected(true);
+  }
+
+  async function handleSend(content: string) {
+    await invoke("send_message", { content });
+  }
+
+  if (!connected) {
+    return (
+      <div>
+        <input
+          placeholder="Enter your username"
+          value={username}
+          onChange={e => setUsername(e.target.value)}
+        />
+        <button onClick={handleConnect}>Join</button>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <MessageList messages={messages} currentUser={username} />
+      <MessageInput onSend={handleSend} />
+    </div>
+  );
+}
+```
+
+**`src/components/MessageList.tsx`**
+
+```tsx
+interface Message {
+  username: string;
+  content: string;
+  timestamp: number;
+}
+
+interface Props {
+  messages: Message[];
+  currentUser: string;
+}
+
+export default function MessageList({ messages, currentUser }: Props) {
+  return (
+    <div>
+      {messages.map((msg, i) => (
+        <div key={i}>
+          <strong>{msg.username === currentUser ? "You" : msg.username}</strong>
+          <span>{msg.content}</span>
+          <small>{new Date(msg.timestamp * 1000).toLocaleTimeString()}</small>
+        </div>
+      ))}
+    </div>
+  );
+}
+```
+
+**`src/components/MessageInput.tsx`**
+
+```tsx
+import { useState } from "react";
+
+interface Props {
+  onSend: (content: string) => void;
+}
+
+export default function MessageInput({ onSend }: Props) {
+  const [value, setValue] = useState("");
+
+  function handleSend() {
+    if (!value.trim()) return;
+    onSend(value.trim());
+    setValue("");
+  }
+
+  return (
+    <div>
+      <input
+        value={value}
+        onChange={e => setValue(e.target.value)}
+        onKeyDown={e => e.key === "Enter" && handleSend()}
+        placeholder="Type a message..."
+      />
+      <button onClick={handleSend}>Send</button>
+    </div>
+  );
+}
+```
+
+---
+
+## 7. End-to-End Flow
+
+```
+User types message and presses Enter
+        ↓
+React calls invoke("send_message", { content })
+        ↓
+Rust builds ChatMessage JSON, publishes to community/general (QoS 1)
+        ↓
+Mosquitto receives and forwards to all subscribers
+        ↓
+Rust eventloop receives Publish packet
+        ↓
+app.emit("mqtt-message", chat_msg) → React
+        ↓
+React appends message to state → MessageList re-renders
+```
+
+Sender also receives their own message back from the broker, which is correct behaviour — it confirms delivery and keeps all clients in sync.
 
 ---
 
 ## 8. Verification Checklist
 
-| Step | Command/Action | Expected Result |
-|------|----------------|-----------------|
-| 1 | `uvicorn server.main:app` | FastAPI starts on `:8000`, Swagger at `/docs` |
-| 2 | Run `client/main.py` (Instance A) | GTK window opens, connects, indicator green |
-| 3 | Run `client/main.py` (Instance B) | Second window connects independently |
-| 4 | Send message A→B | B receives instantly, SQLite updated, UI appended |
-| 5 | Kill B, send A→B | A shows `pending`. Restart B. |
-| 6 | B reconnects | B does not receive old message (server drops). A retries until delivered or manually cleared. |
-| 7 | Validate schema mismatch | Server rejects/ignores invalid JSON, client logs error |
+| Step | Action | Expected result |
+|---|---|---|
+| 1 | `docker compose up -d` | Mosquitto running on port 1883 |
+| 2 | `cargo tauri dev` | App opens, shows username input |
+| 3 | Enter username, click Join | Connected to broker |
+| 4 | Open second instance with different username | Both connected |
+| 5 | Send message from instance A | Appears in both A and B |
+| 6 | Send message from instance B | Appears in both A and B |
+| 7 | Close instance B, send from A | Message published (no receiver — expected) |
+| 8 | Reopen instance B | Does not receive missed messages (expected in Phase 1) |
 
 ---
 
-## Next Steps (Post-PoC)
-1. Replace `payload: str` with base64-encoded AES-GCM ciphertext.
-2. Implement RSA key exchange over separate WebSocket channel.
-3. Add PBKDF2 key derivation from user passphrase.
-4. Replace ephemeral server drop with in-memory TTL queue for offline delivery.
-5. Add GTK message status icons (⏳ pending, ✓ sent, ✓✓ delivered).
+## Next Steps
 
-This guide contains the exact schemas, infrastructure boundaries, and integration patterns required to execute the PoC. Begin with Phase 2 (Shared Schemas), then implement the FastAPI relay, followed by the GTK async client and SQLite state layer.
+- **Phase 2:** Add member list, DM topic structure (`community/dm/{a}/{b}`), click to open DM
+- **Phase 3:** Username persistence, local message history (SQLite via Tauri), online presence via MQTT will/retain
+- **Phase 4:** Authentication on Mosquitto, invite link system
+- **Phase 5:** E2EE — encrypt payload before publish, decrypt on receive. No broker or topic changes needed.
