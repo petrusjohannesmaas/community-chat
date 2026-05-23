@@ -16,7 +16,7 @@ function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
 
   useEffect(() => {
-    const unlisten = listen<ChatMessage>("mqtt-message", (event) => {
+    const unlisten = listen<ChatMessage>("ws-message", (event) => {
       setMessages((prev) => [...prev, event.payload]);
     });
     return () => {
