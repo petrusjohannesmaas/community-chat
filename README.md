@@ -75,6 +75,8 @@ docker compose up -d
 
 The desktop client is distributed as a native installer (`.deb`, `.exe`, `.dmg`) built by Tauri.
 
+**Broker address:** The client currently has the broker IP hardcoded in `src-tauri/src/mqtt.rs`. Before distributing the client, update `BROKER` to point at the machine running Mosquitto. A config file approach is planned for a later phase.
+
 ---
 
 ## Project Structure
