@@ -13,10 +13,11 @@ struct UsernameState(Arc<Mutex<String>>);
 async fn connect(
     app: tauri::AppHandle,
     username: String,
+    password: String,
     ws_state: State<'_, WsState>,
     username_state: State<'_, UsernameState>,
 ) -> Result<(), String> {
-    let writer = client::connect(app, username.clone()).await?;
+    let writer = client::connect(app, username.clone(), password).await?;
     *ws_state.0.lock().await = Some(writer);
     *username_state.0.lock().await = username;
     Ok(())
@@ -25,13 +26,15 @@ async fn connect(
 #[tauri::command]
 async fn send_message(
     content: String,
+    recipient: Option<String>,
     ws_state: State<'_, WsState>,
-    username_state: State<'_, UsernameState>,
 ) -> Result<(), String> {
     let mut guard = ws_state.0.lock().await;
-    let username = username_state.0.lock().await;
     if let Some(writer) = guard.as_mut() {
-        client::send(writer, &username, &content).await;
+        match recipient {
+            Some(to) => client::send_dm(writer, &to, &content).await,
+            None => client::send_chat(writer, &content).await,
+        }
     }
     Ok(())
 }

@@ -3,13 +3,14 @@ mod ws;
 
 use axum::{routing::get, Router};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{mpsc, RwLock};
 
 pub struct AppState {
     pub pool: sqlx::SqlitePool,
-    pub tx: broadcast::Sender<String>,
+    pub connections: Arc<RwLock<HashMap<String, mpsc::Sender<String>>>>,
 }
 
 #[tokio::main]
@@ -28,9 +29,10 @@ async fn main() {
 
     db::init(&pool).await;
 
-    let (tx, _rx) = broadcast::channel::<String>(100);
-
-    let app_state = Arc::new(AppState { pool, tx });
+    let app_state = Arc::new(AppState {
+        pool,
+        connections: Arc::new(RwLock::new(HashMap::new())),
+    });
 
     let app = Router::new()
         .route("/ws", get(ws::handler))

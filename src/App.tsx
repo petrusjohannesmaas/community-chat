@@ -1,8 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import MessageList from "./components/MessageList";
 import MessageInput from "./components/MessageInput";
+import MemberList from "./components/MemberList";
 
 interface ChatMessage {
   username: string;
@@ -10,51 +11,162 @@ interface ChatMessage {
   timestamp: number;
 }
 
+interface DmPayload {
+  from: string;
+  to: string;
+  content: string;
+  timestamp: number;
+}
+
+type ConversationId = "global" | `dm:${string}`;
+
+function conversationLabel(id: ConversationId): string {
+  if (id === "global") return "# Global Chat";
+  return `DM with ${id.slice(3)}`;
+}
+
 function App() {
   const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
   const [connected, setConnected] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [members, setMembers] = useState<string[]>([]);
+  const [messagesByConversation, setMessagesByConversation] = useState<
+    Record<string, ChatMessage[]>
+  >({ global: [] });
+  const [currentConversation, setCurrentConversation] =
+    useState<ConversationId>("global");
+
+  const receivedMessage = useCallback(
+    (msg: ChatMessage) => {
+      setMessagesByConversation((prev) => ({
+        ...prev,
+        global: [...(prev.global || []), msg],
+      }));
+    },
+    [],
+  );
+
+  const receivedDm = useCallback(
+    (dm: DmPayload, currentUser: string) => {
+      const other = dm.from === currentUser ? dm.to : dm.from;
+      const key = `dm:${other}`;
+      const chatMsg: ChatMessage = {
+        username: dm.from,
+        content: dm.content,
+        timestamp: dm.timestamp,
+      };
+      setMessagesByConversation((prev) => ({
+        ...prev,
+        [key]: [...(prev[key] || []), chatMsg],
+      }));
+    },
+    [],
+  );
 
   useEffect(() => {
-    const unlisten = listen<ChatMessage>("ws-message", (event) => {
-      setMessages((prev) => [...prev, event.payload]);
-    });
-    return () => {
-      unlisten.then((f) => f());
-    };
-  }, []);
+    const unlisteners: (() => void)[] = [];
 
-  async function handleConnect() {
-    await invoke("connect", { username });
-    setConnected(true);
+    listen<ChatMessage>("ws-message", (event) => {
+      receivedMessage(event.payload);
+    }).then((unlisten) => unlisteners.push(unlisten));
+
+    listen<DmPayload>("ws-dm", (event) => {
+      receivedDm(event.payload, username);
+    }).then((unlisten) => unlisteners.push(unlisten));
+
+    listen<string[]>("ws-member-list", (event) => {
+      setMembers(event.payload);
+    }).then((unlisten) => unlisteners.push(unlisten));
+
+    listen<string>("ws-user-joined", (event) => {
+      setMembers((prev) =>
+        prev.includes(event.payload) ? prev : [...prev, event.payload],
+      );
+    }).then((unlisten) => unlisteners.push(unlisten));
+
+    listen<string>("ws-user-left", (event) => {
+      setMembers((prev) => prev.filter((m) => m !== event.payload));
+    }).then((unlisten) => unlisteners.push(unlisten));
+
+    return () => {
+      unlisteners.forEach((f) => f());
+    };
+  }, [receivedMessage, receivedDm, username]);
+
+  async function handleLogin() {
+    setLoginError("");
+    try {
+      await invoke("connect", { username, password });
+      setConnected(true);
+    } catch (e: any) {
+      setLoginError(typeof e === "string" ? e : "Login failed");
+    }
   }
 
   async function handleSend(content: string) {
-    await invoke("send_message", { content });
+    const recipient =
+      currentConversation === "global"
+        ? null
+        : currentConversation.slice(3);
+    await invoke("send_message", { content, recipient });
+  }
+
+  function handleSelectMember(member: string) {
+    if (member === username) return;
+    setCurrentConversation(`dm:${member}`);
+  }
+
+  function handleSelectGlobal() {
+    setCurrentConversation("global");
+  }
+
+  function getCurrentMessages(): ChatMessage[] {
+    return messagesByConversation[currentConversation] || [];
   }
 
   if (!connected) {
     return (
-      <div style={{ padding: "2rem", fontFamily: "sans-serif" }}>
-        <h1>Community Chat</h1>
-        <input
-          placeholder="Enter your username"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleConnect()}
-          style={{ marginRight: "0.5rem", padding: "0.5rem" }}
-        />
-        <button onClick={handleConnect} style={{ padding: "0.5rem" }}>
-          Join
-        </button>
+      <div className="login-container">
+        <div className="login-form">
+          <h1>Community Chat</h1>
+          <input
+            placeholder="Username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoFocus
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleLogin()}
+          />
+          {loginError && <div className="login-error">{loginError}</div>}
+          <button onClick={handleLogin}>Login</button>
+        </div>
       </div>
     );
   }
 
   return (
-    <div style={{ padding: "1rem", fontFamily: "sans-serif", height: "100vh", display: "flex", flexDirection: "column", boxSizing: "border-box" }}>
-      <MessageList messages={messages} currentUser={username} />
-      <MessageInput onSend={handleSend} />
+    <div className="chat-layout">
+      <MemberList
+        members={members}
+        currentUser={username}
+        activeConversation={currentConversation}
+        onSelectGlobal={handleSelectGlobal}
+        onSelectMember={handleSelectMember}
+      />
+      <div className="chat-main">
+        <MessageList
+          messages={getCurrentMessages()}
+          currentUser={username}
+          conversationLabel={conversationLabel(currentConversation)}
+        />
+        <MessageInput onSend={handleSend} />
+      </div>
     </div>
   );
 }
